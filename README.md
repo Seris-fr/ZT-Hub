@@ -33,7 +33,7 @@ ZT-Hub est une application de bureau entièrement développée en Python qui per
 2. Saisissez le nom d'une œuvre dans le champ de recherche.
 3. Choisissez la catégorie appropriée.
 4. Lancez la recherche et les résultats s'afficheront.
-5. Les téléchargement s'afficheront sur la droite.
+5. La liste des épisodes s'affiche sur la droite (Un lien unique pour un film).
 
 ## Note Légale
 
