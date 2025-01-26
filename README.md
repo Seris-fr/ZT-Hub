@@ -4,6 +4,8 @@ ZT-Hub est une application de bureau entièrement développée en Python qui per
 
 ![ZT-Hub Screenshot](images/logo.png)
 
+![Capture d'écran](images/app.png)
+
 ## Fonctionnalités
 
 - Interface utilisateur simple et épurée
@@ -30,8 +32,8 @@ ZT-Hub est une application de bureau entièrement développée en Python qui per
 1. Une fois la clé API configurée, l'application est prête à l'emploi.
 2. Saisissez le nom d'une œuvre dans le champ de recherche.
 3. Choisissez la catégorie appropriée.
-4. Lancez la recherche et les résultats s'afficheront sur la droite.
-5. Cliquez sur les épisodes ou téléchargements souhaités pour commencer.
+4. Lancez la recherche et les résultats s'afficheront.
+5. Les téléchargement s'afficheront sur la droite.
 
 ## Note Légale
 
