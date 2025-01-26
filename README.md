@@ -20,9 +20,9 @@ ZT-Hub est une application de bureau entièrement développée en Python qui per
 4. Vous pouvez également créer un raccourci vers l'application pour un accès plus facile.
 
 ## Configuration
-
-1. Après avoir lancé l'application, cliquez sur l'icône en forme de rouage en haut à gauche pour accéder aux paramètres.
-2. Indiquez votre clé API AllDebrid :
+1. Configurez votre DNS en [1.1.1.1](https://one.one.one.one/fr-FR/dns/), en effet zone-téléchargement est bloqué sur la plupart des FAI par DNS.
+2. Après avoir lancé l'application, cliquez sur l'icône en forme de rouage en haut à gauche pour accéder aux paramètres.
+3. Indiquez votre clé API AllDebrid :
    - Si vous n'avez pas de clé API, rendez-vous sur [alldebrid.fr](https://alldebrid.fr) et connectez-vous à votre compte premium.
    - Allez dans la section APIKEYS et créez une nouvelle clé API.
    - Entrez cette clé dans l'application ZT-Hub.
