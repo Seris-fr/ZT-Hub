@@ -1,0 +1,19 @@
+#build
+bin/
+obj/
+
+*.suo
+*.user
+*.zip
+*.userosscache
+*.sln.docstates
+.vs/
+
+# IDE
+.idea/
+
+# Temp
+*.pdb
+
+*.DotSetting.user
+
