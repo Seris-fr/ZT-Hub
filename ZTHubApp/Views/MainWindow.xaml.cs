@@ -261,14 +261,48 @@ namespace ZTHubApp.Views
 
                 DownloadQueue.Clear();
 
-                // Prepare download items
-                var downloads = new List<(string Name, string Link, string FilePath)>();
+                // Prepare download items with alternative sources
+                var downloads = new List<(string Name, string Link, string FilePath, List<(string HostName, string Link)> AlternativeLinks)>();
 
                 foreach (var item in selectedItems)
                 {
                     string fileName = SanitizeFileName(item.Name.Trim());
                     string filePath = Path.Combine(targetFolder, fileName);
-                    downloads.Add((item.Name, item.Link, filePath));
+
+                    // Find all alternative links for this file from all hosters
+                    var alternativeLinks = new List<(string HostName, string Link)>();
+
+                    foreach (var hostGroup in _allDownloadLinks)
+                    {
+                        var matchingLink = hostGroup.Links.FirstOrDefault(l => l.Link == item.Link);
+                        if (matchingLink != null)
+                        {
+                            // Found the current link, now get all links with same name from all hosts
+                            foreach (var otherHostGroup in _allDownloadLinks)
+                            {
+                                var sameFileLink = otherHostGroup.Links.FirstOrDefault(l => l.Name.Trim() == item.Name.Trim());
+                                if (sameFileLink != null && sameFileLink.Link != "SEPARATOR")
+                                {
+                                    alternativeLinks.Add((otherHostGroup.HostName, sameFileLink.Link));
+                                }
+                            }
+                            break;
+                        }
+                    }
+
+                    // If no alternatives found, use just the current link
+                    if (!alternativeLinks.Any())
+                    {
+                        alternativeLinks.Add(("Inconnu", item.Link));
+                    }
+
+                    // IMPORTANT: Always put 1fichier first
+                    alternativeLinks = alternativeLinks
+                        .OrderByDescending(link => link.HostName.Contains("1fichier", StringComparison.OrdinalIgnoreCase))
+                        .ThenBy(link => link.HostName)
+                        .ToList();
+
+                    downloads.Add((item.Name, item.Link, filePath, alternativeLinks));
                 }
 
                 // Enqueue all downloads
