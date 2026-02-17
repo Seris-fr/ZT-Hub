@@ -12,7 +12,11 @@
     <ItemGroup>
         <PackageReference Include="HtmlAgilityPack" Version="1.11.60" />
     </ItemGroup>
-    
+
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+    </ItemGroup>
+
     <ItemGroup>
         <Content Include="logo.ico" />
     </ItemGroup>

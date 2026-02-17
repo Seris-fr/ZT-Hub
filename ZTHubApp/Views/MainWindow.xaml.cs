@@ -27,6 +27,7 @@ namespace ZTHubApp.Views
         public ObservableCollection<SearchResult> SearchResults { get; } = new();
         public ObservableCollection<string> Hosters { get; } = new();
         public ObservableCollection<DownloadLink> DownloadLinks { get; } = new();
+        public ObservableCollection<DownloadQueueItem> DownloadQueue { get; } = new();
 
         private string _searchQuery = "";
         public string SearchQuery { get => _searchQuery; set { _searchQuery = value; OnPropertyChanged(); } }
@@ -46,11 +47,37 @@ namespace ZTHubApp.Views
         private List<HostLinkGroup> _allDownloadLinks = new();
         private string _allDebridApiKey = "";
         private CancellationTokenSource? _downloadCts;
-        
+
         private CancellationTokenSource? _linkExtractionCts;
-        
+
         private CancellationTokenSource? _searchCts;
-        
+
+        private DownloadQueueService? _queueService;
+        private int _downloadDelay = 10; // Default 10 seconds
+        private string _lastDownloadFolder = "";
+
+        private bool _isQueueActive;
+        public bool IsQueueActive
+        {
+            get => _isQueueActive;
+            set
+            {
+                _isQueueActive = value;
+                OnPropertyChanged();
+            }
+        }
+
+        private string _queueStatus = "";
+        public string QueueStatus
+        {
+            get => _queueStatus;
+            set
+            {
+                _queueStatus = value;
+                OnPropertyChanged();
+            }
+        }
+
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public MainWindow()
@@ -142,38 +169,62 @@ namespace ZTHubApp.Views
         
         private async void DownloadButton_Click(object sender, RoutedEventArgs e)
         {
-            if (!(EpisodeListBox.SelectedItem is DownloadLink selectedLink))
+            var selectedItems = EpisodeListBox.SelectedItems.Cast<DownloadLink>()
+                .Where(link => link.Link != "SEPARATOR")
+                .ToList();
+
+            if (!selectedItems.Any())
             {
-                MessageBox.Show("Veuillez sélectionner un lien à télécharger.", "Aucune sélection", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show("Veuillez sélectionner au moins un lien à télécharger.",
+                    "Aucune sélection", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
-            if (selectedLink.Link == "SEPARATOR") return;
 
             if (string.IsNullOrWhiteSpace(_allDebridApiKey))
             {
-                MessageBox.Show("Veuillez configurer votre clé API AllDebrid dans les paramètres (icône ⚙️).", "Configuration requise", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show("Veuillez configurer votre clé API AllDebrid dans les paramètres (icône ⚙️).",
+                    "Configuration requise", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
+            // Single item - use legacy flow
+            if (selectedItems.Count == 1)
+            {
+                await DownloadSingleItemAsync(selectedItems[0]);
+                return;
+            }
+
+            // Multiple items - use queue
+            await DownloadMultipleItemsAsync(selectedItems);
+        }
+
+        private async Task DownloadSingleItemAsync(DownloadLink selectedLink)
+        {
             try
             {
                 StatusText = "Débridage du lien...";
                 var allDebridService = new AllDebridService(_allDebridApiKey);
-                var finalLink = await allDebridService.UnlockLinkAsync(selectedLink.Link); 
+                var finalLink = await allDebridService.UnlockLinkAsync(selectedLink.Link);
 
                 StatusText = "Récupération du nom du fichier...";
-                string suggestedFileName = await _downloadService.GetSuggestedFileNameAsync(finalLink) ?? selectedLink.Name.Trim();
+                string suggestedFileName = await _downloadService.GetSuggestedFileNameAsync(finalLink)
+                    ?? selectedLink.Name.Trim();
 
                 var saveDialog = new SaveFileDialog
                 {
                     FileName = SanitizeFileName(suggestedFileName),
-                    Filter = "Tous les fichiers (*.*)|*.*"
+                    Filter = "Tous les fichiers (*.*)|*.*",
+                    InitialDirectory = !string.IsNullOrEmpty(_lastDownloadFolder)
+                        ? _lastDownloadFolder
+                        : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
                 };
 
                 if (saveDialog.ShowDialog() == true)
                 {
+                    _lastDownloadFolder = Path.GetDirectoryName(saveDialog.FileName) ?? "";
                     _downloadCts = new CancellationTokenSource();
-                    var progress = new Progress<(int percent, string speed)>(update => StatusText = $"Téléchargement : {update.percent}% ({update.speed})");
+                    var progress = new Progress<(int percent, string speed)>(
+                        update => StatusText = $"Téléchargement : {update.percent}% ({update.speed})");
                     await _downloadService.DownloadFileAsync(finalLink, saveDialog.FileName, progress, _downloadCts.Token);
                     StatusText = "Téléchargement terminé !";
                 }
@@ -182,14 +233,132 @@ namespace ZTHubApp.Views
             catch (Exception ex) { StatusText = $"Erreur de téléchargement: {ex.Message}"; }
         }
 
-        private void CancelDownload_Click(object sender, RoutedEventArgs e) => _downloadCts?.Cancel();
+        private async Task DownloadMultipleItemsAsync(List<DownloadLink> selectedItems)
+        {
+            // Ask user for folder once
+            var folderDialog = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = $"Sélectionnez le dossier de destination pour {selectedItems.Count} fichiers",
+                SelectedPath = !string.IsNullOrEmpty(_lastDownloadFolder)
+                    ? _lastDownloadFolder
+                    : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+            };
+
+            if (folderDialog.ShowDialog() != System.Windows.Forms.DialogResult.OK)
+                return;
+
+            string targetFolder = folderDialog.SelectedPath;
+            _lastDownloadFolder = targetFolder;
+
+            try
+            {
+                StatusText = "Préparation de la file de téléchargement...";
+
+                // Create queue service
+                _queueService = new DownloadQueueService(_allDebridApiKey, _downloadDelay);
+                _queueService.StatusChanged += (s, status) => Dispatcher.Invoke(() => StatusText = status);
+                _queueService.QueueCompleted += OnQueueCompleted;
+
+                DownloadQueue.Clear();
+
+                // Prepare download items
+                var downloads = new List<(string Name, string Link, string FilePath)>();
+
+                foreach (var item in selectedItems)
+                {
+                    string fileName = SanitizeFileName(item.Name.Trim());
+                    string filePath = Path.Combine(targetFolder, fileName);
+                    downloads.Add((item.Name, item.Link, filePath));
+                }
+
+                // Enqueue all downloads
+                _queueService.EnqueueDownloads(downloads);
+
+                // Bind queue to UI
+                foreach (var queueItem in _queueService.QueueItems)
+                {
+                    DownloadQueue.Add(queueItem);
+                }
+
+                IsQueueActive = true;
+                var stats = _queueService.GetQueueStats();
+                QueueStatus = $"File: {stats.completed}/{stats.total} terminés";
+
+                // Start processing
+                await _queueService.ProcessQueueAsync();
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"Erreur de file d'attente: {ex.Message}";
+                MessageBox.Show(ex.Message, "Erreur", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void OnQueueCompleted(object? sender, EventArgs e)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_queueService != null)
+                {
+                    var stats = _queueService.GetQueueStats();
+                    StatusText = $"File terminée: {stats.completed} réussis, {stats.failed} échoués sur {stats.total}";
+                    QueueStatus = $"Terminé: {stats.completed}/{stats.total} réussis, {stats.failed} échoués";
+
+                    if (stats.failed > 0)
+                    {
+                        var failedItems = _queueService.QueueItems
+                            .Where(i => i.Status == QueueItemStatus.Failed)
+                            .Select(i => $"- {i.Name}: {i.ErrorMessage}")
+                            .ToList();
+
+                        MessageBox.Show(
+                            $"Téléchargements terminés avec {stats.failed} erreur(s):\n\n" +
+                            string.Join("\n", failedItems),
+                            "Téléchargements terminés avec erreurs",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Warning);
+                    }
+                    else
+                    {
+                        MessageBox.Show(
+                            $"Tous les téléchargements ont réussi ({stats.completed}/{stats.total})",
+                            "Téléchargements terminés",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Information);
+                    }
+                }
+            });
+        }
+
+        private void CancelDownload_Click(object sender, RoutedEventArgs e)
+        {
+            _downloadCts?.Cancel();
+            _queueService?.CancelCurrentDownload();
+        }
+
+        private void SelectAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            EpisodeListBox.SelectAll();
+        }
+
+        private void DeselectAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            EpisodeListBox.UnselectAll();
+        }
+
+        private void CancelQueue_Click(object sender, RoutedEventArgs e)
+        {
+            _queueService?.CancelEntireQueue();
+            StatusText = "Annulation de la file d'attente...";
+        }
         
         private void SettingsButton_Click(object sender, RoutedEventArgs e)
         {
-            var dialog = new SettingsWindow(_allDebridApiKey, GetBaseUrl()) { Owner = this };
+            var dialog = new SettingsWindow(_allDebridApiKey, GetBaseUrl(), _downloadDelay) { Owner = this };
             if (dialog.ShowDialog() == true)
             {
                 _allDebridApiKey = dialog.AllDebridApiKey;
+                _downloadDelay = dialog.DownloadDelay;
                 SaveSettings(dialog.BaseUrl);
                 _searchService = new SearchService(dialog.BaseUrl);
                 StatusText = "Paramètres sauvegardés.";
@@ -341,9 +510,13 @@ namespace ZTHubApp.Views
                 {
                     var json = File.ReadAllText(settingsPath);
                     var settings = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
-                    if (settings != null && settings.TryGetValue("AllDebridApiKey", out var apiKey))
+                    if (settings != null)
                     {
-                        _allDebridApiKey = apiKey;
+                        if (settings.TryGetValue("AllDebridApiKey", out var apiKey))
+                            _allDebridApiKey = apiKey;
+
+                        if (settings.TryGetValue("DownloadDelay", out var delay) && int.TryParse(delay, out var delayValue))
+                            _downloadDelay = delayValue;
                     }
                 }
             }
@@ -357,7 +530,8 @@ namespace ZTHubApp.Views
                 var settings = new Dictionary<string, string>
                 {
                     ["AllDebridApiKey"] = _allDebridApiKey,
-                    ["BaseUrl"] = baseUrl
+                    ["BaseUrl"] = baseUrl,
+                    ["DownloadDelay"] = _downloadDelay.ToString()
                 };
                 var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(GetSettingsPath(), json);

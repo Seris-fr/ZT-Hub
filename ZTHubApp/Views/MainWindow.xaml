@@ -7,12 +7,17 @@
         xmlns:models="clr-namespace:ZTHubApp.Models"
         mc:Ignorable="d"
         Title="ZT Hub alpha v1.1.3" Height="800" Width="1200" WindowStartupLocation="CenterScreen">
-    
+
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
+    </Window.Resources>
+
     <Grid Background="{StaticResource PrimaryBackground}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
@@ -74,15 +79,52 @@
                     <ComboBox x:Name="HosterComboBox" ItemsSource="{Binding Hosters}" SelectionChanged="HosterComboBox_SelectionChanged"/>
                 </StackPanel>
                 <StackPanel DockPanel.Dock="Bottom">
-                    <Button Content="Télécharger le lien sélectionné" Margin="0,10,0,5" Click="DownloadButton_Click"/>
+                    <!-- Boutons de sélection -->
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,5">
+                        <Button Content="Tout sélectionner" Width="110" Click="SelectAllButton_Click"/>
+                        <Button Content="Tout désélectionner" Width="125" Margin="5,0,0,0" Click="DeselectAllButton_Click"/>
+                    </StackPanel>
+
+                    <!-- Boutons de téléchargement -->
+                    <Button Content="Télécharger la sélection" Margin="0,5,0,5" Click="DownloadButton_Click"/>
                     <Button Content="Annuler le téléchargement" Margin="0,0,0,5" Click="CancelDownload_Click"/>
+                    <Button Content="Annuler toute la file" Margin="0,0,0,5" Click="CancelQueue_Click"
+                            Visibility="{Binding IsQueueActive, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
+                    <!-- Statut de la file -->
+                    <TextBlock Text="{Binding QueueStatus}" Margin="0,5,0,0" TextWrapping="Wrap" FontSize="11" Foreground="#4A9EFF"/>
                 </StackPanel>
-                <ListBox x:Name="EpisodeListBox" ItemsSource="{Binding DownloadLinks}" Margin="0,10,0,0"/>
+                <ListBox x:Name="EpisodeListBox" ItemsSource="{Binding DownloadLinks}"
+                         SelectionMode="Extended" Margin="0,10,0,0"/>
             </DockPanel>
         </Grid>
 
+        <!-- File d'attente de téléchargement -->
+        <Expander Grid.Row="3" Header="File d'attente de téléchargement"
+                  IsExpanded="True"
+                  Visibility="{Binding IsQueueActive, Converter={StaticResource BoolToVisibilityConverter}}"
+                  Margin="10,0,10,0"
+                  MaxHeight="200">
+            <ListBox ItemsSource="{Binding DownloadQueue}"
+                     Background="{StaticResource SecondaryBackground}">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Name}" Grid.Column="0" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Text="{Binding StatusText}" Grid.Column="1" Margin="5,0,0,0"
+                                       Foreground="{Binding StatusColor}"/>
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Expander>
+
         <!-- Barre de statut -->
-        <StatusBar Grid.Row="3" Background="{StaticResource ControlBackground}">
+        <StatusBar Grid.Row="4" Background="{StaticResource ControlBackground}">
             <TextBlock Text="{Binding StatusText}"/>
         </StatusBar>
     </Grid>
