@@ -4,13 +4,15 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        Title="Paramètres" Height="300" Width="450" WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+        Title="Paramètres" Height="380" Width="450" WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
     
     
     <Grid Background="{StaticResource PrimaryBackground}">
         
         <Grid Margin="20">
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -32,7 +34,14 @@
                 <TextBlock Text="(0 = aucun délai)" Margin="10,0,0,0" VerticalAlignment="Center"/>
             </StackPanel>
 
-            <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+            <Label Grid.Row="6" Content="Dossier de téléchargement par défaut:"/>
+            <StackPanel Grid.Row="7" Orientation="Horizontal" Margin="0,5,0,15">
+                <TextBox x:Name="DefaultFolderBox" Width="250" IsReadOnly="True"/>
+                <Button Content="Parcourir..." Width="85" Margin="5,0,0,0" Click="BrowseFolder_Click"/>
+                <Button Content="X" Width="25" Margin="5,0,0,0" ToolTip="Effacer" Click="ClearFolder_Click"/>
+            </StackPanel>
+
+            <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
                 <Button Content="Sauvegarder" IsDefault="true" Width="100" Margin="0,0,10,0" Click="SaveButton_Click"/>
                 <Button Content="Annuler" IsCancel="true" Width="80"/>
             </StackPanel>

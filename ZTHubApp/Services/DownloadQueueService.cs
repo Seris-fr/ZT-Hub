@@ -56,28 +56,39 @@ namespace ZTHubApp.Services
 
             try
             {
-                var pendingItems = QueueItems.Where(item => item.Status == QueueItemStatus.Pending).ToList();
-
-                for (int i = 0; i < pendingItems.Count; i++)
+                // Continuous loop - processes items as they are added
+                while (true)
                 {
                     if (_queueCts.Token.IsCancellationRequested)
                     {
-                        // Mark remaining items as cancelled
-                        foreach (var remainingItem in pendingItems.Skip(i))
+                        // Mark all remaining pending items as cancelled
+                        foreach (var item in QueueItems.Where(i => i.Status == QueueItemStatus.Pending))
                         {
-                            remainingItem.Status = QueueItemStatus.Cancelled;
+                            item.Status = QueueItemStatus.Cancelled;
                         }
                         break;
                     }
 
-                    var item = pendingItems[i];
-                    await ProcessSingleDownloadAsync(item, _queueCts.Token);
+                    // Find next pending item
+                    var nextItem = QueueItems.FirstOrDefault(item => item.Status == QueueItemStatus.Pending);
 
-                    // Apply delay between downloads (except after last item)
-                    if (i < pendingItems.Count - 1 && _delaySeconds > 0 && !_queueCts.Token.IsCancellationRequested)
+                    if (nextItem == null)
                     {
-                        StatusChanged?.Invoke(this, $"Attente de {_delaySeconds} secondes avant le prochain téléchargement...");
-                        await Task.Delay(_delaySeconds * 1000, _queueCts.Token);
+                        // No more pending items - queue is complete
+                        break;
+                    }
+
+                    // Process the item
+                    await ProcessSingleDownloadAsync(nextItem, _queueCts.Token);
+
+                    // Apply delay between downloads (if there are more pending items)
+                    if (_delaySeconds > 0 && !_queueCts.Token.IsCancellationRequested)
+                    {
+                        if (QueueItems.Any(item => item.Status == QueueItemStatus.Pending))
+                        {
+                            StatusChanged?.Invoke(this, $"Attente de {_delaySeconds} secondes avant le prochain téléchargement...");
+                            await Task.Delay(_delaySeconds * 1000, _queueCts.Token);
+                        }
                     }
                 }
 
@@ -86,6 +97,11 @@ namespace ZTHubApp.Services
             catch (OperationCanceledException)
             {
                 StatusChanged?.Invoke(this, "File d'attente annulée.");
+                // Mark remaining pending items as cancelled
+                foreach (var item in QueueItems.Where(i => i.Status == QueueItemStatus.Pending))
+                {
+                    item.Status = QueueItemStatus.Cancelled;
+                }
             }
             finally
             {
@@ -98,10 +114,15 @@ namespace ZTHubApp.Services
         {
             const int MAX_RETRIES = 3;
             const int RETRY_DELAY_SECONDS = 10;
+            const int MAX_GLOBAL_ATTEMPTS = 50; // Limite absolue de tentatives
 
-            // INFINITE LOOP - only exits on success or cancellation
-            while (true)
+            int globalAttempts = 0; // Compteur global
+
+            // Boucle avec limite globale
+            while (globalAttempts < MAX_GLOBAL_ATTEMPTS)
             {
+                globalAttempts++;
+
                 while (item.CurrentSourceIndex < item.AlternativeLinks.Count)
                 {
                     var (hostName, link) = item.AlternativeLinks[item.CurrentSourceIndex];
@@ -184,13 +205,14 @@ namespace ZTHubApp.Services
 
                             if (item.RetryCount < MAX_RETRIES)
                             {
-                                // Retry with same source
+                                // Retry with same source avec backoff exponentiel
                                 item.Status = QueueItemStatus.Retrying;
-                                StatusChanged?.Invoke(this, $"Échec tentative {item.RetryCount}/{MAX_RETRIES} pour {item.Name} ({hostName}). Nouvelle tentative dans {RETRY_DELAY_SECONDS}s...");
+                                int backoffDelay = CalculateBackoffDelay(item.RetryCount - 1);
+                                StatusChanged?.Invoke(this, $"Échec tentative {item.RetryCount}/{MAX_RETRIES} pour {item.Name} ({hostName}). Nouvelle tentative dans {backoffDelay}s...");
 
                                 try
                                 {
-                                    await Task.Delay(RETRY_DELAY_SECONDS * 1000, queueToken);
+                                    await Task.Delay(backoffDelay * 1000, queueToken);
                                 }
                                 catch (OperationCanceledException)
                                 {
@@ -218,12 +240,13 @@ namespace ZTHubApp.Services
 
                 // All sources exhausted - reset to first source and try again
                 item.CurrentSourceIndex = 0;
-                StatusChanged?.Invoke(this, $"Toutes les sources ont échoué pour {item.Name}. Recommence depuis 1fichier...");
+                int cycleDelay = CalculateBackoffDelay(globalAttempts / item.AlternativeLinks.Count);
+                StatusChanged?.Invoke(this, $"Toutes les sources ont échoué pour {item.Name}. Recommence depuis 1fichier dans {cycleDelay}s... (tentative {globalAttempts}/{MAX_GLOBAL_ATTEMPTS})");
 
-                // Small delay before restarting the cycle
+                // Small delay before restarting the cycle avec backoff
                 try
                 {
-                    await Task.Delay(RETRY_DELAY_SECONDS * 1000, queueToken);
+                    await Task.Delay(cycleDelay * 1000, queueToken);
                 }
                 catch (OperationCanceledException)
                 {
@@ -231,6 +254,20 @@ namespace ZTHubApp.Services
                     return;
                 }
             }
+
+            // Si on atteint la limite, marquer comme échec
+            item.Status = QueueItemStatus.Failed;
+            item.ErrorMessage = $"Échec après {MAX_GLOBAL_ATTEMPTS} tentatives globales";
+            StatusChanged?.Invoke(this, $"Échec définitif: {item.Name} - Nombre maximum de tentatives atteint");
+        }
+
+        /// <summary>
+        /// Calcule le délai avec backoff exponentiel
+        /// </summary>
+        private static int CalculateBackoffDelay(int retryCount, int baseDelaySeconds = 5)
+        {
+            // Exponentiel: 5s, 10s, 20s, puis cap à 30s
+            return (int)Math.Min(baseDelaySeconds * Math.Pow(2, retryCount), 30);
         }
 
         public void CancelCurrentDownload()
