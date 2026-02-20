@@ -23,6 +23,7 @@ namespace ZTHubApp.Services
 
         public event EventHandler<string>? StatusChanged;
         public event EventHandler? QueueCompleted;
+        public event EventHandler<DownloadQueueItem>? DownloadFailed;
 
         public DownloadQueueService(string allDebridApiKey, int delaySeconds)
         {
@@ -112,153 +113,125 @@ namespace ZTHubApp.Services
 
         private async Task ProcessSingleDownloadAsync(DownloadQueueItem item, CancellationToken queueToken)
         {
-            const int MAX_RETRIES = 3;
-            const int RETRY_DELAY_SECONDS = 10;
-            const int MAX_GLOBAL_ATTEMPTS = 50; // Limite absolue de tentatives
+            const int MAX_RETRIES_PER_LINK = 5;
 
-            int globalAttempts = 0; // Compteur global
-
-            // Boucle avec limite globale
-            while (globalAttempts < MAX_GLOBAL_ATTEMPTS)
+            while (item.CurrentSourceIndex < item.AlternativeLinks.Count)
             {
-                globalAttempts++;
+                var (hostName, link) = item.AlternativeLinks[item.CurrentSourceIndex];
+                item.CurrentHostName = hostName;
+                item.Link = link;
+                item.RetryCount = 0;
 
-                while (item.CurrentSourceIndex < item.AlternativeLinks.Count)
+                while (item.RetryCount < MAX_RETRIES_PER_LINK)
                 {
-                    var (hostName, link) = item.AlternativeLinks[item.CurrentSourceIndex];
-                    item.CurrentHostName = hostName;
-                    item.Link = link;
-                    item.RetryCount = 0;
+                    _currentDownloadCts = new CancellationTokenSource();
+                    var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(queueToken, _currentDownloadCts.Token);
 
-                    while (item.RetryCount < MAX_RETRIES)
+                    try
                     {
-                        _currentDownloadCts = new CancellationTokenSource();
-                        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(queueToken, _currentDownloadCts.Token);
+                        // Step 1: Unlock link
+                        item.Status = QueueItemStatus.Unlocking;
+                        StatusChanged?.Invoke(this, $"Débridage: {item.Name} ({hostName})");
+                        var finalLink = await _allDebridService.UnlockLinkAsync(link);
 
-                        try
+                        linkedCts.Token.ThrowIfCancellationRequested();
+
+                        // Step 1.5: Get correct file extension from unlocked link
+                        var suggestedFileName = await _downloadService.GetSuggestedFileNameAsync(finalLink);
+                        if (!string.IsNullOrEmpty(suggestedFileName))
                         {
-                            // Step 1: Unlock link
-                            item.Status = QueueItemStatus.Unlocking;
-                            StatusChanged?.Invoke(this, $"Débridage: {item.Name} ({hostName})");
-                            var finalLink = await _allDebridService.UnlockLinkAsync(link);
-
-                            linkedCts.Token.ThrowIfCancellationRequested();
-
-                            // Step 1.5: Get correct file extension from unlocked link
-                            var suggestedFileName = await _downloadService.GetSuggestedFileNameAsync(finalLink);
-                            if (!string.IsNullOrEmpty(suggestedFileName))
+                            var extension = System.IO.Path.GetExtension(suggestedFileName);
+                            if (!string.IsNullOrEmpty(extension))
                             {
-                                var extension = System.IO.Path.GetExtension(suggestedFileName);
-                                if (!string.IsNullOrEmpty(extension))
+                                var currentExtension = System.IO.Path.GetExtension(item.FilePath);
+                                if (string.IsNullOrEmpty(currentExtension) || currentExtension != extension)
                                 {
-                                    // Update file path with correct extension
-                                    var currentExtension = System.IO.Path.GetExtension(item.FilePath);
-                                    if (string.IsNullOrEmpty(currentExtension) || currentExtension != extension)
-                                    {
-                                        var filePathWithoutExt = System.IO.Path.Combine(
-                                            System.IO.Path.GetDirectoryName(item.FilePath) ?? "",
-                                            System.IO.Path.GetFileNameWithoutExtension(item.FilePath)
-                                        );
-                                        item.FilePath = filePathWithoutExt + extension;
-                                    }
+                                    var filePathWithoutExt = System.IO.Path.Combine(
+                                        System.IO.Path.GetDirectoryName(item.FilePath) ?? "",
+                                        System.IO.Path.GetFileNameWithoutExtension(item.FilePath)
+                                    );
+                                    item.FilePath = filePathWithoutExt + extension;
                                 }
                             }
-
-                            linkedCts.Token.ThrowIfCancellationRequested();
-
-                            // Step 2: Download
-                            item.Status = QueueItemStatus.Downloading;
-                            item.Progress = 0;
-                            StatusChanged?.Invoke(this, $"Téléchargement: {item.Name} ({hostName})");
-
-                            var progress = new Progress<(int percent, string speed)>(update =>
-                            {
-                                item.Progress = update.percent;
-                                StatusChanged?.Invoke(this, $"Téléchargement: {item.Name} - {update.percent}% ({update.speed}) ({hostName})");
-                            });
-
-                            await _downloadService.DownloadFileAsync(finalLink, item.FilePath, progress, linkedCts.Token);
-
-                            // Success!
-                            item.Status = QueueItemStatus.Completed;
-                            item.Progress = 100;
-                            StatusChanged?.Invoke(this, $"Terminé: {item.Name}");
-                            linkedCts.Dispose();
-                            _currentDownloadCts = null;
-                            return;
                         }
-                        catch (OperationCanceledException)
+
+                        linkedCts.Token.ThrowIfCancellationRequested();
+
+                        // Step 2: Download
+                        item.Status = QueueItemStatus.Downloading;
+                        item.Progress = 0;
+                        StatusChanged?.Invoke(this, $"Téléchargement: {item.Name} ({hostName})");
+
+                        var progress = new Progress<(int percent, string speed)>(update =>
                         {
-                            item.Status = QueueItemStatus.Cancelled;
-                            StatusChanged?.Invoke(this, $"Annulé: {item.Name}");
-                            linkedCts.Dispose();
-                            _currentDownloadCts = null;
-                            return;
-                        }
-                        catch (Exception ex)
-                        {
-                            linkedCts.Dispose();
-                            _currentDownloadCts = null;
+                            item.Progress = update.percent;
+                            StatusChanged?.Invoke(this, $"Téléchargement: {item.Name} - {update.percent}% ({update.speed}) ({hostName})");
+                        });
 
-                            item.RetryCount++;
-                            item.ErrorMessage = ex.Message;
+                        await _downloadService.DownloadFileAsync(finalLink, item.FilePath, progress, linkedCts.Token);
 
-                            if (item.RetryCount < MAX_RETRIES)
-                            {
-                                // Retry with same source avec backoff exponentiel
-                                item.Status = QueueItemStatus.Retrying;
-                                int backoffDelay = CalculateBackoffDelay(item.RetryCount - 1);
-                                StatusChanged?.Invoke(this, $"Échec tentative {item.RetryCount}/{MAX_RETRIES} pour {item.Name} ({hostName}). Nouvelle tentative dans {backoffDelay}s...");
-
-                                try
-                                {
-                                    await Task.Delay(backoffDelay * 1000, queueToken);
-                                }
-                                catch (OperationCanceledException)
-                                {
-                                    item.Status = QueueItemStatus.Cancelled;
-                                    return;
-                                }
-                            }
-                            else
-                            {
-                                // Max retries reached, try next source
-                                StatusChanged?.Invoke(this, $"Échec des 3 tentatives avec {hostName} pour {item.Name}. Changement de source...");
-                                break;
-                            }
-                        }
+                        // Success!
+                        item.Status = QueueItemStatus.Completed;
+                        item.Progress = 100;
+                        StatusChanged?.Invoke(this, $"Terminé: {item.Name}");
+                        linkedCts.Dispose();
+                        _currentDownloadCts = null;
+                        return;
                     }
-
-                    // Move to next source
-                    item.CurrentSourceIndex++;
-                    if (item.CurrentSourceIndex < item.AlternativeLinks.Count)
+                    catch (OperationCanceledException)
                     {
-                        var nextHost = item.AlternativeLinks[item.CurrentSourceIndex].HostName;
-                        StatusChanged?.Invoke(this, $"Changement de source: {nextHost} pour {item.Name}");
+                        item.Status = QueueItemStatus.Cancelled;
+                        StatusChanged?.Invoke(this, $"Annulé: {item.Name}");
+                        linkedCts.Dispose();
+                        _currentDownloadCts = null;
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        linkedCts.Dispose();
+                        _currentDownloadCts = null;
+
+                        item.RetryCount++;
+                        item.ErrorMessage = ex.Message;
+
+                        if (item.RetryCount < MAX_RETRIES_PER_LINK)
+                        {
+                            item.Status = QueueItemStatus.Retrying;
+                            int backoffDelay = CalculateBackoffDelay(item.RetryCount - 1);
+                            StatusChanged?.Invoke(this, $"Échec tentative {item.RetryCount}/{MAX_RETRIES_PER_LINK} pour {item.Name} ({hostName}). Nouvelle tentative dans {backoffDelay}s...");
+
+                            try
+                            {
+                                await Task.Delay(backoffDelay * 1000, queueToken);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                item.Status = QueueItemStatus.Cancelled;
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            StatusChanged?.Invoke(this, $"Échec des {MAX_RETRIES_PER_LINK} tentatives avec {hostName} pour {item.Name}. Changement de source...");
+                            break;
+                        }
                     }
                 }
 
-                // All sources exhausted - reset to first source and try again
-                item.CurrentSourceIndex = 0;
-                int cycleDelay = CalculateBackoffDelay(globalAttempts / item.AlternativeLinks.Count);
-                StatusChanged?.Invoke(this, $"Toutes les sources ont échoué pour {item.Name}. Recommence depuis 1fichier dans {cycleDelay}s... (tentative {globalAttempts}/{MAX_GLOBAL_ATTEMPTS})");
-
-                // Small delay before restarting the cycle avec backoff
-                try
+                // Move to next source
+                item.CurrentSourceIndex++;
+                if (item.CurrentSourceIndex < item.AlternativeLinks.Count)
                 {
-                    await Task.Delay(cycleDelay * 1000, queueToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    item.Status = QueueItemStatus.Cancelled;
-                    return;
+                    var nextHost = item.AlternativeLinks[item.CurrentSourceIndex].HostName;
+                    StatusChanged?.Invoke(this, $"Changement de source: {nextHost} pour {item.Name}");
                 }
             }
 
-            // Si on atteint la limite, marquer comme échec
+            // Toutes les sources épuisées — échec définitif
             item.Status = QueueItemStatus.Failed;
-            item.ErrorMessage = $"Échec après {MAX_GLOBAL_ATTEMPTS} tentatives globales";
-            StatusChanged?.Invoke(this, $"Échec définitif: {item.Name} - Nombre maximum de tentatives atteint");
+            item.ErrorMessage = $"Échec après {MAX_RETRIES_PER_LINK} tentatives sur chaque source ({item.AlternativeLinks.Count} sources testées)";
+            StatusChanged?.Invoke(this, $"Échec définitif: {item.Name} - Toutes les sources épuisées");
+            DownloadFailed?.Invoke(this, item);
         }
 
         /// <summary>

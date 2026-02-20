@@ -488,6 +488,7 @@ namespace ZTHubApp.Views
                         }
                     });
                     _queueService.QueueCompleted += OnQueueCompleted;
+                    _queueService.DownloadFailed += OnDownloadFailed;
                     DownloadQueue.Clear();
                 }
 
@@ -604,6 +605,20 @@ namespace ZTHubApp.Views
                 StatusText = $"Erreur de file d'attente: {ex.Message}";
                 MessageBox.Show(ex.Message, "Erreur", MessageBoxButton.OK, MessageBoxImage.Error);
             }
+        }
+
+        private void OnDownloadFailed(object? sender, DownloadQueueItem failedItem)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                FailedDownloads.Add(new FailedDownload
+                {
+                    Name = failedItem.Name,
+                    OriginalLink = failedItem.Link,
+                    AttemptCount = failedItem.RetryCount
+                });
+                HasFailedDownloads = true;
+            });
         }
 
         private void OnQueueCompleted(object? sender, EventArgs e)
