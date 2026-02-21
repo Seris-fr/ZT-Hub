@@ -961,6 +961,258 @@ namespace ZTHubApp.Views
         }
 
 
+        private async void BatchImportButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(_allDebridApiKey))
+            {
+                MessageBox.Show("Veuillez configurer votre clé API AllDebrid dans les paramètres (icône ⚙️).",
+                    "Configuration requise", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            string targetFolder;
+            if (!string.IsNullOrWhiteSpace(_defaultDownloadFolder) && Directory.Exists(_defaultDownloadFolder))
+            {
+                targetFolder = _defaultDownloadFolder;
+            }
+            else
+            {
+                var folderDialog = new System.Windows.Forms.FolderBrowserDialog
+                {
+                    Description = "Sélectionnez le dossier de destination pour les films",
+                    SelectedPath = !string.IsNullOrEmpty(_lastDownloadFolder)
+                        ? _lastDownloadFolder
+                        : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+                };
+
+                if (folderDialog.ShowDialog() != System.Windows.Forms.DialogResult.OK)
+                    return;
+
+                targetFolder = folderDialog.SelectedPath;
+            }
+
+            // Fenêtre modale avec TextBox multiligne
+            var inputWindow = new Window
+            {
+                Title = "Import Liste de Films",
+                Width = 600,
+                Height = 450,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(30, 30, 30))
+            };
+
+            var grid = new Grid { Margin = new Thickness(10) };
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var label = new TextBlock
+            {
+                Text = "Collez la liste de films (un par ligne):\nExemple: Interstellar (2014)",
+                Foreground = System.Windows.Media.Brushes.White,
+                Margin = new Thickness(0, 0, 0, 5)
+            };
+
+            var textBox = new TextBox
+            {
+                AcceptsReturn = true,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Margin = new Thickness(0, 0, 0, 10),
+                FontSize = 13
+            };
+
+            var buttonPanel = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var okButton = new Button { Content = "Importer & Télécharger", Width = 160, Margin = new Thickness(0, 0, 5, 0) };
+            var cancelButton = new Button { Content = "Annuler", Width = 100 };
+
+            okButton.Click += (s, ev) => { inputWindow.DialogResult = true; inputWindow.Close(); };
+            cancelButton.Click += (s, ev) => { inputWindow.DialogResult = false; inputWindow.Close(); };
+
+            buttonPanel.Children.Add(okButton);
+            buttonPanel.Children.Add(cancelButton);
+
+            Grid.SetRow(label, 0);
+            Grid.SetRow(textBox, 1);
+            Grid.SetRow(buttonPanel, 2);
+
+            grid.Children.Add(label);
+            grid.Children.Add(textBox);
+            grid.Children.Add(buttonPanel);
+
+            inputWindow.Content = grid;
+
+            if (inputWindow.ShowDialog() != true || string.IsNullOrWhiteSpace(textBox.Text))
+                return;
+
+            // Parser la liste
+            var filmNames = textBox.Text
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Trim())
+                .Where(line => !string.IsNullOrEmpty(line))
+                .ToList();
+
+            if (!filmNames.Any())
+            {
+                MessageBox.Show("La liste est vide.", "Aucun film", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            // Confirmation
+            var confirmMessage = $"Rechercher et télécharger {filmNames.Count} film(s) ?\n\n" +
+                                 $"📁 Destination : {targetFolder}\n\n" +
+                                 string.Join("\n", filmNames.Take(10).Select(f => "• " + f));
+            if (filmNames.Count > 10)
+                confirmMessage += $"\n... et {filmNames.Count - 10} autre(s)";
+
+            if (MessageBox.Show(confirmMessage, "Confirmer l'import", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                return;
+
+            await ProcessBatchImportAsync(filmNames, targetFolder);
+        }
+
+        private async Task ProcessBatchImportAsync(List<string> filmNames, string targetFolder)
+        {
+            try
+            {
+                // Create queue service if needed
+                if (_queueService == null)
+                {
+                    _queueService = new DownloadQueueService(_allDebridApiKey, _downloadDelay);
+                    _queueService.StatusChanged += (s, status) => Dispatcher.Invoke(() =>
+                    {
+                        StatusText = status;
+                        if (_queueService != null)
+                        {
+                            var stats = _queueService.GetQueueStats();
+                            QueueStatus = $"File: {stats.completed}/{stats.total} terminés ({stats.pending} en attente)";
+                        }
+                    });
+                    _queueService.QueueCompleted += OnQueueCompleted;
+                    _queueService.DownloadFailed += OnDownloadFailed;
+                    DownloadQueue.Clear();
+                }
+
+                var downloads = new List<(string Name, string Link, string FilePath, List<(string HostName, string Link)> AlternativeLinks)>();
+                var notFound = new List<string>();
+                var cts = new CancellationTokenSource();
+
+                for (int i = 0; i < filmNames.Count; i++)
+                {
+                    var filmName = filmNames[i];
+                    StatusText = $"Recherche {i + 1}/{filmNames.Count}: {filmName}...";
+
+                    try
+                    {
+                        // Rechercher le film
+                        var (results, _) = await _searchService.SearchAsync(filmName, "films", 1, cts.Token);
+
+                        if (!results.Any())
+                        {
+                            notFound.Add(filmName);
+                            continue;
+                        }
+
+                        // Prendre le premier résultat
+                        var result = results.First();
+
+                        // Extraire les liens
+                        StatusText = $"Extraction des liens {i + 1}/{filmNames.Count}: {filmName}...";
+                        var hostGroups = await _linkExtractor.ExtractDownloadLinksAsync(result.Link, cts.Token);
+
+                        if (!hostGroups.Any() || !hostGroups.Any(g => g.Links.Any()))
+                        {
+                            notFound.Add(filmName);
+                            continue;
+                        }
+
+                        // Trouver le premier lien disponible, prioriser 1fichier
+                        var orderedGroups = hostGroups
+                            .OrderByDescending(g => g.HostName.Contains("1fichier", StringComparison.OrdinalIgnoreCase))
+                            .ThenBy(g => g.HostName)
+                            .ToList();
+
+                        var firstLink = orderedGroups.First().Links.First();
+
+                        // Collecter les liens alternatifs (même fichier sur différents hosters)
+                        var alternativeLinks = new List<(string HostName, string Link)>();
+                        foreach (var group in orderedGroups)
+                        {
+                            if (group.Links.Any())
+                            {
+                                alternativeLinks.Add((group.HostName, group.Links.First().Link));
+                            }
+                        }
+
+                        // Construire le chemin: targetFolder/Film/NomDuFilm (Année)/fichier
+                        string fileName = SanitizeFileName(firstLink.Name.Trim());
+                        var parsedInfo = FileOrganizerService.ParseFileName(fileName);
+
+                        // Utiliser le titre du résultat de recherche pour le nom du dossier
+                        string folderName = SanitizeFileName(result.Title.Trim());
+                        string filmFolder = Path.Combine(targetFolder, "Film", folderName);
+                        Directory.CreateDirectory(filmFolder);
+
+                        string filePath = Path.Combine(filmFolder, fileName);
+
+                        downloads.Add((firstLink.Name, firstLink.Link, filePath, alternativeLinks));
+                    }
+                    catch (Exception ex)
+                    {
+                        notFound.Add($"{filmName} (Erreur: {ex.Message})");
+                    }
+
+                    // Petit délai entre les recherches pour ne pas spam le site
+                    await Task.Delay(500);
+                }
+
+                if (!downloads.Any())
+                {
+                    MessageBox.Show("Aucun film trouvé dans la liste.", "Aucun résultat", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                // Afficher les films non trouvés
+                if (notFound.Any())
+                {
+                    MessageBox.Show(
+                        $"{downloads.Count} film(s) trouvé(s), {notFound.Count} non trouvé(s):\n\n" +
+                        string.Join("\n", notFound.Select(f => "• " + f)),
+                        "Résultat de la recherche",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+
+                // Ajouter à la file de téléchargement
+                _queueService.EnqueueDownloads(downloads);
+
+                var existingItems = DownloadQueue.ToList();
+                foreach (var queueItem in _queueService.QueueItems)
+                {
+                    if (!existingItems.Contains(queueItem))
+                    {
+                        DownloadQueue.Add(queueItem);
+                    }
+                }
+
+                IsQueueActive = true;
+                var queueStats = _queueService.GetQueueStats();
+                QueueStatus = $"File: {queueStats.completed}/{queueStats.total} terminés";
+
+                StatusText = $"{downloads.Count} film(s) ajouté(s) à la file de téléchargement";
+
+                if (!_queueService.IsRunning)
+                {
+                    await _queueService.ProcessQueueAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"Erreur: {ex.Message}";
+                MessageBox.Show(ex.Message, "Erreur", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         private void PerformSearch()
         {
             _currentPage = 1;
