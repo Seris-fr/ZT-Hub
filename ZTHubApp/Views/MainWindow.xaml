@@ -6,19 +6,27 @@
         xmlns:local="clr-namespace:ZTHubApp.Views"
         xmlns:models="clr-namespace:ZTHubApp.Models"
         mc:Ignorable="d"
-        Title="ZT Hub alpha v1.1.3" Height="800" Width="1200" WindowStartupLocation="CenterScreen">
-    
+        Title="ZT Hub alpha v1.2.0" Height="800" Width="1200" WindowStartupLocation="CenterScreen">
+
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
+    </Window.Resources>
+
     <Grid Background="{StaticResource PrimaryBackground}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Barre d'outils -->
         <DockPanel Grid.Row="0" Margin="10">
             <Button DockPanel.Dock="Left" Content="⚙️" Width="30" ToolTip="Paramètres" Click="SettingsButton_Click"/>
+            <Button DockPanel.Dock="Left" Content="📥 DL Direct" Width="80" Margin="5,0,0,0" ToolTip="Télécharger un lien direct" Click="DirectDownloadButton_Click"/>
+            <Button DockPanel.Dock="Left" Content="📋 Import Liste" Width="100" Margin="5,0,0,0" ToolTip="Importer une liste de films à télécharger" Click="BatchImportButton_Click"/>
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                 <Button Content="Rechercher" Width="100" Click="SearchButton_Click"/>
                 <StackPanel Orientation="Horizontal" Margin="5,0,0,0">
@@ -30,9 +38,10 @@
              
                     <RadioButton Content="Séries" GroupName="Category" Tag="series" Margin="5,0,0,0"
                                  IsChecked="{Binding SelectedCategory, Converter={StaticResource ValueToBooleanConverter}, ConverterParameter=series}"/>
-             
-                    <RadioButton Content="Jeux" GroupName="Category" Tag="jeux" Margin="5,0,0,0"
-                                 IsChecked="{Binding SelectedCategory, Converter={StaticResource ValueToBooleanConverter}, ConverterParameter=jeux}"/>
+
+                    <CheckBox Content="VF uniquement" Margin="15,0,0,0" VerticalAlignment="Center"
+                              IsChecked="{Binding VFOnlyFilter}"
+                              Foreground="White"/>
                 </StackPanel>
             </StackPanel>
             <TextBox Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged}" KeyDown="SearchBox_KeyDown" Margin="5,0"/>
@@ -54,16 +63,40 @@
             </Grid.ColumnDefinitions>
 
             <!-- Liste des résultats -->
-            <ListBox Grid.Column="0" ItemsSource="{Binding SearchResults}" SelectionChanged="ResultsListBox_SelectionChanged">
-                <ListBox.ItemTemplate>
+            <DockPanel Grid.Column="0">
+                <TextBlock DockPanel.Dock="Top"
+                          Text="Résultats de recherche (Ctrl+clic pour sélectionner plusieurs saisons)"
+                          Margin="5" FontSize="10" Foreground="#4A9EFF"
+                          Visibility="{Binding HasSearchResults, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                <ListBox x:Name="ResultsListBox"
+                         ItemsSource="{Binding SearchResults}"
+                         SelectionMode="Extended"
+                         SelectionChanged="ResultsListBox_SelectionChanged">
+                <ListBox.Resources>
+                    <!-- DataTemplate for SearchResult -->
                     <DataTemplate DataType="{x:Type models:SearchResult}">
                         <StackPanel Orientation="Horizontal" Margin="5">
                             <Image Source="{Binding Image}" Width="60" Height="90" Margin="0,0,10,0" VerticalAlignment="Center"/>
                             <TextBlock Text="{Binding Title}" VerticalAlignment="Center" TextWrapping="Wrap"/>
                         </StackPanel>
                     </DataTemplate>
-                </ListBox.ItemTemplate>
-            </ListBox>
+
+                    <!-- DataTemplate for SeriesGroup -->
+                    <DataTemplate DataType="{x:Type models:SeriesGroup}">
+                        <Border Background="#2a2a2a" Padding="5" Margin="5">
+                            <StackPanel Orientation="Horizontal">
+                                <Image Source="{Binding Image}" Width="60" Height="90" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding DisplayName}" FontWeight="Bold" TextWrapping="Wrap" Foreground="White"/>
+                                    <TextBlock Text="{Binding SeasonsDescription}" FontSize="11" Foreground="#4A9EFF" Margin="0,5,0,0"/>
+                                    <TextBlock Text="📁 Cliquez pour sélectionner les saisons" FontSize="10" Foreground="Gray" Margin="0,3,0,0"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ListBox.Resources>
+                </ListBox>
+            </DockPanel>
 
             <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Center" VerticalAlignment="Stretch" Background="#2d2d2d"/>
 
@@ -74,15 +107,130 @@
                     <ComboBox x:Name="HosterComboBox" ItemsSource="{Binding Hosters}" SelectionChanged="HosterComboBox_SelectionChanged"/>
                 </StackPanel>
                 <StackPanel DockPanel.Dock="Bottom">
-                    <Button Content="Télécharger le lien sélectionné" Margin="0,10,0,5" Click="DownloadButton_Click"/>
+                    <!-- Boutons de sélection -->
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,5">
+                        <Button Content="Tout sélectionner" Width="110" Click="SelectAllButton_Click"/>
+                        <Button Content="Tout désélectionner" Width="125" Margin="5,0,0,0" Click="DeselectAllButton_Click"/>
+                    </StackPanel>
+
+                    <!-- Boutons de téléchargement -->
+                    <Button Content="Télécharger la sélection" Margin="0,5,0,5" Click="DownloadButton_Click"/>
                     <Button Content="Annuler le téléchargement" Margin="0,0,0,5" Click="CancelDownload_Click"/>
+                    <Button Content="Annuler toute la file" Margin="0,0,0,5" Click="CancelQueue_Click"
+                            Visibility="{Binding IsQueueActive, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
+                    <!-- Statut de la file -->
+                    <TextBlock Text="{Binding QueueStatus}" Margin="0,5,0,0" TextWrapping="Wrap" FontSize="11" Foreground="#4A9EFF"/>
                 </StackPanel>
-                <ListBox x:Name="EpisodeListBox" ItemsSource="{Binding DownloadLinks}" Margin="0,10,0,0"/>
+
+                <!-- Zone centrale: Saisons + Épisodes -->
+                <Grid Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="1*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="2*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Liste des saisons -->
+                    <TextBlock Grid.Row="0" Text="Saisons (Ctrl+clic pour sélection multiple):" Margin="0,0,0,5"
+                               Visibility="{Binding HasSeasons, Converter={StaticResource BoolToVisibilityConverter}}"
+                               Foreground="#4A9EFF" FontSize="11"/>
+                    <ListBox Grid.Row="1" x:Name="SeasonListBox"
+                             ItemsSource="{Binding Seasons}"
+                             SelectionMode="Extended"
+                             SelectionChanged="SeasonListBox_SelectionChanged"
+                             Visibility="{Binding HasSeasons, Converter={StaticResource BoolToVisibilityConverter}}"
+                             Margin="0,0,0,5">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="#1e1e1e" Padding="8,5" Margin="2">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding DisplayName}" FontWeight="Bold" Foreground="White"/>
+                                        <TextBlock Text="{Binding EpisodeCount, StringFormat='{}{0} épisodes'}"
+                                                   FontSize="10" Foreground="#888"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <!-- Séparateur -->
+                    <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch"
+                                  Background="#2d2d2d"
+                                  Visibility="{Binding HasSeasons, Converter={StaticResource BoolToVisibilityConverter}}"/>
+
+                    <!-- Liste des épisodes -->
+                    <DockPanel Grid.Row="3">
+                        <TextBlock DockPanel.Dock="Top" Text="{Binding EpisodeListHeader}" Margin="0,5,0,5"/>
+                        <ListBox x:Name="EpisodeListBox"
+                                 ItemsSource="{Binding DownloadLinks}"
+                                 SelectionMode="Extended"/>
+                    </DockPanel>
+                </Grid>
             </DockPanel>
         </Grid>
 
+        <!-- File d'attente de téléchargement -->
+        <Expander Grid.Row="3" Header="File d'attente de téléchargement"
+                  IsExpanded="True"
+                  Visibility="{Binding IsQueueActive, Converter={StaticResource BoolToVisibilityConverter}}"
+                  Margin="10,0,10,0"
+                  MaxHeight="200">
+            <ListBox ItemsSource="{Binding DownloadQueue}"
+                     Background="{StaticResource SecondaryBackground}">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Name}" Grid.Column="0" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Text="{Binding StatusText}" Grid.Column="1" Margin="5,0,0,0"
+                                       Foreground="{Binding StatusColor}"/>
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Expander>
+
+        <!-- Liste des échecs de téléchargement -->
+        <Expander Grid.Row="4" Header="Échecs de téléchargement (cliquez pour ajouter un lien alternatif)"
+                  IsExpanded="False"
+                  Visibility="{Binding HasFailedDownloads, Converter={StaticResource BoolToVisibilityConverter}}"
+                  Background="{StaticResource ControlBackground}" Margin="10,5">
+            <ListBox ItemsSource="{Binding FailedDownloads}" Background="{StaticResource ControlBackground}" MaxHeight="150">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Border BorderBrush="#555" BorderThickness="1" Margin="2" Padding="5" Background="#2a2a2a">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="2*"/>
+                                    <ColumnDefinition Width="3*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Grid.Column="0" Text="{Binding Name}" VerticalAlignment="Center"
+                                           Foreground="White" TextWrapping="Wrap" Margin="0,0,5,0"/>
+
+                                <TextBox Grid.Column="1" Text="{Binding AlternativeLink, UpdateSourceTrigger=PropertyChanged}"
+                                         VerticalAlignment="Center" Margin="5,0"
+                                         Background="#1e1e1e" Foreground="White" BorderBrush="#555"
+                                         ToolTip="Collez un lien alternatif ici"/>
+
+                                <Button Grid.Column="2" Content="📥 DL" Width="50"
+                                        Click="RetryFailedDownload_Click" Tag="{Binding}"
+                                        ToolTip="Télécharger avec le lien alternatif"/>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Expander>
+
         <!-- Barre de statut -->
-        <StatusBar Grid.Row="3" Background="{StaticResource ControlBackground}">
+        <StatusBar Grid.Row="5" Background="{StaticResource ControlBackground}">
             <TextBlock Text="{Binding StatusText}"/>
         </StatusBar>
     </Grid>
