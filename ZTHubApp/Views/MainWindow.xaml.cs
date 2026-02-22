@@ -510,13 +510,21 @@ namespace ZTHubApp.Views
                         for (int i = itemIndex - 1; i >= 0; i--)
                         {
                             var link = DownloadLinks[i];
-                            if (link.Link == "SEPARATOR" && link.Name.StartsWith("📁"))
+                            if (link.Link == "SEPARATOR")
                             {
-                                // Extraire le numéro de saison du header
-                                var match = System.Text.RegularExpressions.Regex.Match(link.Name, @"Saison (\d+)");
-                                if (match.Success)
+                                if (link.Name.StartsWith("📁"))
                                 {
-                                    seasonNumber = int.Parse(match.Groups[1].Value);
+                                    // Header de saison trouvé - extraire le numéro
+                                    var match = System.Text.RegularExpressions.Regex.Match(link.Name, @"Saison (\d+)");
+                                    if (match.Success)
+                                    {
+                                        seasonNumber = int.Parse(match.Groups[1].Value);
+                                    }
+                                    break; // Arrêter dans tous les cas (header trouvé ou pas de numéro)
+                                }
+                                else
+                                {
+                                    // Séparateur de frontière (═══) : on a croisé une limite de saison sans trouver de header
                                     break;
                                 }
                             }
@@ -1075,7 +1083,84 @@ namespace ZTHubApp.Views
         {
             try
             {
-                // Create queue service if needed
+                var cts = new CancellationTokenSource();
+
+                // ── Phase 1 : Recherche de tous les films ──────────────────────────────
+                var reviewItems = new List<BatchReviewItem>();
+
+                for (int i = 0; i < filmNames.Count; i++)
+                {
+                    var filmName = filmNames[i];
+                    StatusText = $"Recherche {i + 1}/{filmNames.Count} : {filmName}...";
+
+                    try
+                    {
+                        var (results, _) = await _searchService.SearchAsync(filmName, "films", 1, cts.Token);
+
+                        if (!results.Any())
+                        {
+                            reviewItems.Add(new BatchReviewItem
+                            {
+                                SearchedName = filmName,
+                                AllResults = new List<SearchResult>(),
+                                SelectedResult = null,
+                                Skip = true
+                            });
+                        }
+                        else
+                        {
+                            // Pré-sélection automatique : VF/MULTI + 1080p en priorité
+                            var vfResults = results.Where(r =>
+                            {
+                                var meta = ContentMetadataExtractor.ExtractMetadata(r.Title);
+                                return meta.Language == "VF" || meta.Language == "MULTI";
+                            }).ToList();
+                            var candidates = vfResults.Any() ? vfResults : results.ToList();
+                            var best = candidates.FirstOrDefault(r =>
+                                r.Title.Contains("1080p", StringComparison.OrdinalIgnoreCase))
+                                ?? candidates.First();
+
+                            reviewItems.Add(new BatchReviewItem
+                            {
+                                SearchedName = filmName,
+                                AllResults = results.ToList(),
+                                SelectedResult = best,
+                                Skip = false
+                            });
+                        }
+                    }
+                    catch
+                    {
+                        reviewItems.Add(new BatchReviewItem
+                        {
+                            SearchedName = filmName,
+                            AllResults = new List<SearchResult>(),
+                            SelectedResult = null,
+                            Skip = true
+                        });
+                    }
+
+                    await Task.Delay(400);
+                }
+
+                StatusText = "Recherche terminée — vérification en cours...";
+
+                // ── Phase 2 : Fenêtre de révision ─────────────────────────────────────
+                var reviewWindow = new BatchReviewWindow(reviewItems) { Owner = this };
+                if (reviewWindow.ShowDialog() != true)
+                {
+                    StatusText = "Import annulé.";
+                    return;
+                }
+
+                var confirmedItems = reviewWindow.ConfirmedItems;
+                if (!confirmedItems.Any())
+                {
+                    StatusText = "Aucun film confirmé.";
+                    return;
+                }
+
+                // ── Phase 3 : Extraction des liens et mise en file ─────────────────────
                 if (_queueService == null)
                 {
                     _queueService = new DownloadQueueService(_allDebridApiKey, _downloadDelay);
@@ -1094,117 +1179,94 @@ namespace ZTHubApp.Views
                 }
 
                 var downloads = new List<(string Name, string Link, string FilePath, List<(string HostName, string Link)> AlternativeLinks)>();
-                var notFound = new List<string>();
-                var cts = new CancellationTokenSource();
+                var noLinks = new List<string>();
 
-                for (int i = 0; i < filmNames.Count; i++)
+                for (int i = 0; i < confirmedItems.Count; i++)
                 {
-                    var filmName = filmNames[i];
-                    StatusText = $"Recherche {i + 1}/{filmNames.Count}: {filmName}...";
+                    var item = confirmedItems[i];
+                    var result = item.SelectedResult!;
+                    StatusText = $"Extraction des liens {i + 1}/{confirmedItems.Count} : {item.SearchedName}...";
 
                     try
                     {
-                        // Rechercher le film
-                        var (results, _) = await _searchService.SearchAsync(filmName, "films", 1, cts.Token);
-
-                        if (!results.Any())
-                        {
-                            notFound.Add(filmName);
-                            continue;
-                        }
-
-                        // Prendre le premier résultat
-                        var result = results.First();
-
-                        // Extraire les liens
-                        StatusText = $"Extraction des liens {i + 1}/{filmNames.Count}: {filmName}...";
                         var hostGroups = await _linkExtractor.ExtractDownloadLinksAsync(result.Link, cts.Token);
 
                         if (!hostGroups.Any() || !hostGroups.Any(g => g.Links.Any()))
                         {
-                            notFound.Add(filmName);
+                            noLinks.Add(item.SearchedName);
                             continue;
                         }
 
-                        // Trouver le premier lien disponible, prioriser 1fichier
-                        var orderedGroups = hostGroups
+                        var groups1080 = hostGroups.Where(g =>
+                            g.Type.Contains("1080p", StringComparison.OrdinalIgnoreCase) ||
+                            g.Links.Any(l => l.Name.Contains("1080p", StringComparison.OrdinalIgnoreCase))
+                        ).ToList();
+                        var selectedGroups = groups1080.Any() ? groups1080 : hostGroups;
+
+                        var orderedGroups = selectedGroups
                             .OrderByDescending(g => g.HostName.Contains("1fichier", StringComparison.OrdinalIgnoreCase))
                             .ThenBy(g => g.HostName)
                             .ToList();
 
                         var firstLink = orderedGroups.First().Links.First();
 
-                        // Collecter les liens alternatifs (même fichier sur différents hosters)
                         var alternativeLinks = new List<(string HostName, string Link)>();
                         foreach (var group in orderedGroups)
                         {
                             if (group.Links.Any())
-                            {
                                 alternativeLinks.Add((group.HostName, group.Links.First().Link));
-                            }
                         }
 
-                        // Construire le chemin: targetFolder/Film/NomDuFilm (Année)/fichier
-                        string fileName = SanitizeFileName(firstLink.Name.Trim());
-                        var parsedInfo = FileOrganizerService.ParseFileName(fileName);
-
-                        // Utiliser le titre du résultat de recherche pour le nom du dossier
-                        string folderName = SanitizeFileName(result.Title.Trim());
+                        string folderName = SanitizeFileName(item.SearchedName);
                         string filmFolder = Path.Combine(targetFolder, "Film", folderName);
                         Directory.CreateDirectory(filmFolder);
 
-                        string filePath = Path.Combine(filmFolder, fileName);
+                        string originalExt = Path.GetExtension(firstLink.Name.Trim());
+                        if (string.IsNullOrEmpty(originalExt)) originalExt = ".mkv";
+                        string filePath = Path.Combine(filmFolder, folderName + originalExt);
 
                         downloads.Add((firstLink.Name, firstLink.Link, filePath, alternativeLinks));
                     }
                     catch (Exception ex)
                     {
-                        notFound.Add($"{filmName} (Erreur: {ex.Message})");
+                        noLinks.Add($"{item.SearchedName} (Erreur: {ex.Message})");
                     }
 
-                    // Petit délai entre les recherches pour ne pas spam le site
-                    await Task.Delay(500);
+                    await Task.Delay(400);
                 }
 
                 if (!downloads.Any())
                 {
-                    MessageBox.Show("Aucun film trouvé dans la liste.", "Aucun résultat", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    MessageBox.Show("Aucun lien trouvé pour les films confirmés.", "Aucun résultat", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
 
-                // Afficher les films non trouvés
-                if (notFound.Any())
+                if (noLinks.Any())
                 {
                     MessageBox.Show(
-                        $"{downloads.Count} film(s) trouvé(s), {notFound.Count} non trouvé(s):\n\n" +
-                        string.Join("\n", notFound.Select(f => "• " + f)),
-                        "Résultat de la recherche",
+                        $"{downloads.Count} film(s) prêt(s), {noLinks.Count} sans lien :\n\n" +
+                        string.Join("\n", noLinks.Select(f => "• " + f)),
+                        "Liens manquants",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);
                 }
 
-                // Ajouter à la file de téléchargement
                 _queueService.EnqueueDownloads(downloads);
 
                 var existingItems = DownloadQueue.ToList();
                 foreach (var queueItem in _queueService.QueueItems)
                 {
                     if (!existingItems.Contains(queueItem))
-                    {
                         DownloadQueue.Add(queueItem);
-                    }
                 }
 
                 IsQueueActive = true;
                 var queueStats = _queueService.GetQueueStats();
                 QueueStatus = $"File: {queueStats.completed}/{queueStats.total} terminés";
-
                 StatusText = $"{downloads.Count} film(s) ajouté(s) à la file de téléchargement";
 
                 if (!_queueService.IsRunning)
-                {
                     await _queueService.ProcessQueueAsync();
-                }
             }
             catch (Exception ex)
             {
@@ -1358,15 +1420,42 @@ namespace ZTHubApp.Views
         private List<Season> GroupBySeason(List<HostLinkGroup> groups)
         {
             var seasonDict = new Dictionary<int, Season>();
+            int? currentSeasonFromHeader = null;
 
             foreach (var group in groups)
             {
+                // Si c'est un groupe header, extraire le numéro de saison
+                if (group.HostName == "──HEADER──")
+                {
+                    foreach (var link in group.Links)
+                    {
+                        var match = System.Text.RegularExpressions.Regex.Match(link.Name, @"Saison\s*(\d+)");
+                        if (match.Success)
+                        {
+                            currentSeasonFromHeader = int.Parse(match.Groups[1].Value);
+                        }
+                    }
+                    continue;
+                }
+
+                // Ignorer les séparateurs
+                if (group.HostName.StartsWith("──")) continue;
+
                 foreach (var link in group.Links)
                 {
                     if (link.Link == "SEPARATOR") continue;
 
-                    var contentInfo = FileOrganizerService.ParseFileName(link.Name);
-                    int seasonNumber = contentInfo.Season ?? 0;
+                    // Priorité au numéro de saison du header (venant du titre de la page)
+                    int seasonNumber;
+                    if (currentSeasonFromHeader.HasValue)
+                    {
+                        seasonNumber = currentSeasonFromHeader.Value;
+                    }
+                    else
+                    {
+                        var contentInfo = FileOrganizerService.ParseFileName(link.Name);
+                        seasonNumber = contentInfo.Season ?? 0;
+                    }
 
                     if (!seasonDict.ContainsKey(seasonNumber))
                     {
@@ -1483,15 +1572,12 @@ namespace ZTHubApp.Views
                     });
                 }
 
-                // Ajouter le header de la saison
-                if (selectedSeasons.Count > 1)
+                // Ajouter le header de la saison (toujours, pour permettre la détection du numéro de saison au téléchargement)
+                DownloadLinks.Add(new DownloadLink
                 {
-                    DownloadLinks.Add(new DownloadLink
-                    {
-                        Name = $"📁 {season.DisplayName} ({season.EpisodeCount} épisodes)",
-                        Link = "SEPARATOR"
-                    });
-                }
+                    Name = $"📁 {season.DisplayName} ({season.EpisodeCount} épisodes)",
+                    Link = "SEPARATOR"
+                });
 
                 // Ajouter tous les épisodes de cette saison
                 foreach (var episode in season.Episodes)
